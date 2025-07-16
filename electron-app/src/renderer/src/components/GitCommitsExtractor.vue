@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 
 const since = ref('')
 const until = ref('')
@@ -16,6 +16,52 @@ const tableRows = ref<Array<{
 const rawOutput = ref('')
 const excludeWeekends = ref(true)
 
+// Settings state
+const showSettings = ref(false)
+const settings = ref({
+  projects: [
+    'D:/sapper-unified-ui-react',
+    'D:/apaas-3-ui'
+  ],
+  author: 'gaurav.sharma@sapper.ai'
+})
+const newProject = ref('')
+const newAuthor = ref('')
+
+function openSettings() {
+  newAuthor.value = settings.value.author
+  newProject.value = ''
+  showSettings.value = true
+}
+function closeSettings() {
+  showSettings.value = false
+}
+function addProject() {
+  if (newProject.value && !settings.value.projects.includes(newProject.value)) {
+    settings.value.projects.push(newProject.value)
+    newProject.value = ''
+  }
+}
+function removeProject(idx) {
+  settings.value.projects.splice(idx, 1)
+}
+function saveSettings() {
+  settings.value.author = newAuthor.value
+  localStorage.setItem('gitExtractorSettings', JSON.stringify(settings.value))
+  showSettings.value = false
+}
+function loadSettings() {
+  const s = localStorage.getItem('gitExtractorSettings')
+  if (s) {
+    try {
+      const parsed = JSON.parse(s)
+      if (parsed.projects && Array.isArray(parsed.projects)) settings.value.projects = parsed.projects
+      if (parsed.author) settings.value.author = parsed.author
+    } catch {}
+  }
+}
+onMounted(loadSettings)
+
 function setToday() {
   const today = new Date()
   const yyyy = today.getFullYear()
@@ -24,6 +70,8 @@ function setToday() {
   const dateStr = `${yyyy}-${mm}-${dd}`
   since.value = dateStr
   until.value = dateStr
+  console.log('Set Today:', { since: since.value, until: until.value })
+  runExtraction()
 }
 
 function setThisWeek() {
@@ -40,6 +88,8 @@ function setThisWeek() {
   const tmm = String(today.getMonth() + 1).padStart(2, '0')
   const tdd = String(today.getDate()).padStart(2, '0')
   until.value = `${tyyyy}-${tmm}-${tdd}`
+  console.log('Set This Week:', { since: since.value, until: until.value })
+  runExtraction()
 }
 
 function setThisMonth() {
@@ -49,6 +99,8 @@ function setThisMonth() {
   since.value = `${yyyy}-${mm}-01`
   const tdd = String(today.getDate()).padStart(2, '0')
   until.value = `${yyyy}-${mm}-${tdd}`
+  console.log('Set This Month:', { since: since.value, until: until.value })
+  runExtraction()
 }
 
 function isWeekend(dateStr) {
@@ -63,8 +115,21 @@ const runExtraction = async () => {
   tableRows.value = []
   rawOutput.value = ''
   loading.value = true
+  console.log('Running extraction with:', {
+    since: since.value,
+    until: until.value,
+    projects: settings.value.projects,
+    author: settings.value.author,
+    excludeWeekends: excludeWeekends.value
+  })
   try {
-    const result = await (window.api as any).extractGitCommits(since.value, until.value)
+    const result = await (window.api as any).extractGitCommits(
+      since.value,
+      until.value,
+      [...settings.value.projects], // convert Proxy to plain array
+      settings.value.author
+    )
+    console.log('extractGitCommits result:', result)
     let filteredRows = result.tableRows
     let filteredRaw = result.raw
     if (excludeWeekends.value) {
@@ -80,8 +145,11 @@ const runExtraction = async () => {
     }
     tableRows.value = filteredRows
     rawOutput.value = filteredRaw || ''
+    console.log('Filtered tableRows:', filteredRows)
+    console.log('Filtered rawOutput:', filteredRaw)
   } catch (e: any) {
     error.value = e?.message || 'Failed to extract commits.'
+    console.log('Extraction error:', e)
   } finally {
     loading.value = false
   }
@@ -100,6 +168,9 @@ const copyTable = () => {
 
 <template>
   <div class="git-commits-extractor-full">
+    <div class="settings-bar">
+      <button class="settings-btn" @click="openSettings">Settings</button>
+    </div>
     <h2>Extract Git Commits</h2>
     <div class="toggle-row">
       <label class="toggle-label">
@@ -158,6 +229,30 @@ const copyTable = () => {
         </div>
       </div>
     </div>
+
+    <!-- Settings Modal -->
+    <div v-if="showSettings" class="modal-overlay">
+      <div class="modal">
+        <h3>Settings</h3>
+        <label>Email:
+          <input type="email" v-model="newAuthor" />
+        </label>
+        <div class="project-list">
+          <div class="project-row" v-for="(proj, idx) in settings.projects" :key="proj">
+            <span>{{ proj }}</span>
+            <button @click="removeProject(idx)">Remove</button>
+          </div>
+        </div>
+        <div class="add-project-row">
+          <input type="text" v-model="newProject" placeholder="Add project directory..." />
+          <button @click="addProject">Add</button>
+        </div>
+        <div class="modal-actions">
+          <button @click="saveSettings">Save</button>
+          <button @click="closeSettings">Cancel</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -171,6 +266,24 @@ const copyTable = () => {
   display: flex;
   flex-direction: column;
   color: #000;
+}
+.settings-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
+}
+.settings-btn {
+  background: #fff;
+  border: 1px solid #888;
+  border-radius: 4px;
+  padding: 0.4rem 1.2rem;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background 0.2s, border 0.2s;
+}
+.settings-btn:hover {
+  background: #f0f0f0;
+  border: 1px solid #42b883;
 }
 .toggle-row {
   margin-bottom: 0.5rem;
@@ -261,14 +374,41 @@ button:disabled {
   color: #b00;
   margin-bottom: 1rem;
 }
-@media (max-width: 900px) {
-  .split-panels {
-    flex-direction: column;
-    gap: 1rem;
-  }
-  .panel {
-    min-height: 200px;
-    height: 50vh;
-  }
+/* Modal styles */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.25);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.15);
+  padding: 2rem 2rem 1.5rem 2rem;
+  min-width: 350px;
+  max-width: 90vw;
+}
+.project-list {
+  margin: 1rem 0;
+}
+.project-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+.add-project-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.modal-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: flex-end;
 }
 </style> 
