@@ -5,8 +5,10 @@ import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
 import * as path from 'path'
 import fetch from 'node-fetch'
+import * as dotenv from 'dotenv'
+dotenv.config()
 
-const GEMINI_API_KEY = 'AIzaSyDk52Ylwt-9VhdPoyvKzzGdvswAU6lLwWc'
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 
 function createWindow(): void {
   // Create the browser window.
@@ -103,12 +105,15 @@ app.whenReady().then(() => {
     return { raw, tableRows }
   })
 
-  ipcMain.handle('fetch-ai-summaries', async (event, rows) => {
+  ipcMain.handle('fetch-ai-summaries', async (event, rows, prompt) => {
     try {
+      if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not set in environment')
       if (!Array.isArray(rows) || !rows.length) return {}
-      const prompt =
+      const usedPrompt =
+        prompt ||
         `For each of the following days, summarize the work log in 1-2 sentences, focusing on what was accomplished. Return the summaries in the same order, separated by \n---\n.\n\n` +
-        rows.map((row) => `${row.date}: ${row.summary}`).join('\n')
+          rows.map((row) => `${row.date}: ${row.summary}`).join('\n')
+      console.log('[Gemini] Sending prompt:', usedPrompt)
       const res = await fetch(
         'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' +
           GEMINI_API_KEY,
@@ -116,11 +121,13 @@ app.whenReady().then(() => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }]
+            contents: [{ parts: [{ text: usedPrompt }] }]
           })
         }
       )
+      console.log('[Gemini] Response status:', res.status)
       const data = await res.json()
+      console.log('[Gemini] Response data:', data)
       let aiText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
       const summaries = aiText.split(/\n---\n/).map((s) => s.trim())
       const result = {}
@@ -129,6 +136,7 @@ app.whenReady().then(() => {
       })
       return result
     } catch (e) {
+      console.log('[Gemini] API error:', e)
       const result = {}
       rows.forEach((row) => {
         result[row.date] = 'AI summary failed.'

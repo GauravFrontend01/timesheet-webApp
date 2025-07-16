@@ -5,7 +5,8 @@ import { electronAPI } from '@electron-toolkit/preload'
 const api = {
   extractGitCommits: (since, until, projects, author) =>
     electronAPI.ipcRenderer.invoke('extract-git-commits', { since, until, projects, author }),
-  fetchAISummaries: (payload) => electronAPI.ipcRenderer.invoke('fetch-ai-summaries', payload)
+  fetchAISummaries: (payload, prompt) =>
+    electronAPI.ipcRenderer.invoke('fetch-ai-summaries', payload, prompt)
 }
 
 try {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch, onBeforeUnmount } from 'vue'
 
 const since = ref('')
 const until = ref('')
@@ -20,6 +20,39 @@ const excludeWeekends = ref(true)
 const aiSummaries = ref<Record<string, string>>({})
 const aiTableLoading = ref(false)
 const summaryMode = ref<'normal' | 'ai'>('normal')
+
+function getAISummaryCacheKey() {
+  // Use since, until, author, and projects as a unique key
+  return `aiSummaries_${since.value}_${until.value}_${settings.value.author}_${[...settings.value.projects].join(',')}`
+}
+
+function saveAISummariesToStorage() {
+  const key = getAISummaryCacheKey()
+  localStorage.setItem(key, JSON.stringify(aiSummaries.value))
+}
+
+function loadAISummariesFromStorage() {
+  const key = getAISummaryCacheKey()
+  const cached = localStorage.getItem(key)
+  if (cached) {
+    try {
+      aiSummaries.value = JSON.parse(cached)
+    } catch { aiSummaries.value = {} }
+  } else {
+    aiSummaries.value = {}
+  }
+}
+
+function clearAISummariesCache() {
+  const key = getAISummaryCacheKey()
+  localStorage.removeItem(key)
+  aiSummaries.value = {}
+}
+
+// Call this after extraction and on mount
+function tryLoadAISummaries() {
+  loadAISummariesFromStorage()
+}
 
 // Settings state
 const showSettings = ref(false)
@@ -65,7 +98,35 @@ function loadSettings() {
     } catch {}
   }
 }
-onMounted(loadSettings)
+
+const sessionApiCount = ref(0)
+const prevSessionApiCount = ref(0)
+const promptTemplate = ref('For each of the following days, summarize the work log in 1-2 sentences, focusing on what was accomplished. Return the summaries in the same order, separated by \n---\n.\n\n')
+
+function loadApiCounters() {
+  prevSessionApiCount.value = Number(localStorage.getItem('prevSessionApiCount') || '0')
+  sessionApiCount.value = 0
+}
+function saveApiCounters() {
+  localStorage.setItem('prevSessionApiCount', String(sessionApiCount.value))
+}
+function loadPromptTemplate() {
+  const saved = localStorage.getItem('aiPromptTemplate')
+  if (saved) promptTemplate.value = saved
+}
+function savePromptTemplate() {
+  localStorage.setItem('aiPromptTemplate', promptTemplate.value)
+}
+
+onMounted(() => {
+  loadSettings()
+  tryLoadAISummaries()
+  loadApiCounters()
+  loadPromptTemplate()
+})
+onBeforeUnmount(() => {
+  saveApiCounters()
+})
 
 function setToday() {
   const today = new Date()
@@ -139,14 +200,27 @@ const runExtraction = async () => {
     }
     tableRows.value = filteredRows
     rawOutput.value = filteredRaw || ''
-    // Clear AI summaries for new extraction
-    aiSummaries.value = {}
+    // Load AI summaries from storage for this range
+    tryLoadAISummaries()
   } catch (e: any) {
     error.value = e?.message || 'Failed to extract commits.'
   } finally {
     loading.value = false
   }
 }
+
+const showToast = ref(false)
+const toastMessage = ref('')
+let toastTimeout: ReturnType<typeof setTimeout> | null = null
+
+function showCopyToast(mode) {
+  toastMessage.value = `Copied table (${mode === 'ai' ? 'AI summary' : 'Normal summary'})`
+  showToast.value = true
+  if (toastTimeout) clearTimeout(toastTimeout)
+  toastTimeout = setTimeout(() => { showToast.value = false }, 2000)
+}
+
+const copyWithHeader = ref(true)
 
 const copyTable = () => {
   if (!tableRows.value.length) return
@@ -157,8 +231,9 @@ const copyTable = () => {
       : row.summary
     return `${row.date}\t${row.task}\t${summary}\t${row.hours}\t${row.extra1}\t${row.extra2}`
   })
-  const text = [header, ...rows].join('\n')
+  const text = copyWithHeader.value ? [header, ...rows].join('\n') : rows.join('\n')
   navigator.clipboard.writeText(text)
+  showCopyToast(summaryMode.value)
 }
 
 const GEMINI_API_KEY = 'AIzaSyDk52Ylwt-9VhdPoyvKzzGdvswAU6lLwWc'
@@ -172,17 +247,22 @@ async function fetchAISummariesForAll() {
       return
     }
     const payload = missingRows.map(row => ({ date: row.date, summary: row.summary }))
+    // Build the full prompt: user template + days/descriptions
+    const fullPrompt = promptTemplate.value + '\n' + missingRows.map(row => `${row.date}: ${row.summary}`).join('\n')
     console.log('Calling main process for AI summaries:', payload)
-    const result = await (window.api as any).fetchAISummaries(payload)
+    const result = await (window.api as any).fetchAISummaries(payload, fullPrompt)
+    sessionApiCount.value++
     console.log('AI summaries result from main:', result)
     for (const date in result) {
       aiSummaries.value[date] = result[date]
     }
+    saveAISummariesToStorage()
   } catch (e) {
     console.log('AI summary IPC error:', e)
     tableRows.value.forEach(row => {
       if (!aiSummaries.value[row.date]) aiSummaries.value[row.date] = 'AI summary failed.'
     })
+    saveAISummariesToStorage()
   } finally {
     aiTableLoading.value = false
   }
@@ -208,6 +288,10 @@ function watchSummaryMode() {
 <template>
   <div class="git-commits-extractor-full">
     <div class="settings-bar">
+      <div class="api-counter">
+        <span title="Gemini API calls this session">🔄 {{ sessionApiCount }}</span>
+        <span title="Previous session">/ {{ prevSessionApiCount }}</span>
+      </div>
       <button class="settings-btn" @click="openSettings">Settings</button>
     </div>
     <h2>Extract Git Commits</h2>
@@ -246,7 +330,11 @@ function watchSummaryMode() {
             <span class="slider"></span>
             <span class="toggle-label-text">AI Summary</span>
           </label>
+          <label class="copy-header-toggle">
+            <input type="checkbox" v-model="copyWithHeader" /> with header
+          </label>
           <button @click="copyTable" :disabled="!tableRows.length">Copy Table</button>
+          <button v-if="summaryMode === 'ai'" @click="() => { clearAISummariesCache(); fetchAISummariesForAll(); }" :disabled="aiTableLoading || !tableRows.length" class="regen-ai-btn">Regenerate AI Summaries</button>
         </div>
         <div class="table-scrollable">
           <table v-if="tableRows.length">
@@ -294,6 +382,11 @@ function watchSummaryMode() {
         <label>Email:
           <input type="email" v-model="newAuthor" />
         </label>
+        <label style="margin-top:1rem;display:block;">
+          AI Prompt Template:
+          <textarea v-model="promptTemplate" @change="savePromptTemplate" rows="3" style="width:100%;margin-top:0.3rem;" />
+          <small>Only the initial instructions are editable. The list of days/descriptions will be appended automatically.</small>
+        </label>
         <div class="project-list">
           <div class="project-row" v-for="(proj, idx) in settings.projects" :key="proj">
             <span>{{ proj }}</span>
@@ -310,6 +403,7 @@ function watchSummaryMode() {
         </div>
       </div>
     </div>
+    <div v-if="showToast" class="copy-toast">{{ toastMessage }}</div>
   </div>
 </template>
 
@@ -514,5 +608,73 @@ button:disabled {
   display: flex;
   gap: 1rem;
   justify-content: flex-end;
+}
+.regen-ai-btn {
+  background: #fffbe6;
+  color: #7B61FF;
+  border: 1px solid #7B61FF;
+  border-radius: 4px;
+  margin-left: 1rem;
+  font-weight: 600;
+  transition: background 0.2s, color 0.2s;
+}
+.regen-ai-btn:hover {
+  background: #f3eaff;
+  color: #5a3fdc;
+}
+.api-counter {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 1.1rem;
+  margin-right: 1.5rem;
+  color: #7B61FF;
+  font-weight: 600;
+}
+.prompt-editor {
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+.prompt-editor label {
+  font-weight: 500;
+  color: #7B61FF;
+}
+.prompt-editor textarea {
+  width: 100%;
+  min-width: 250px;
+  max-width: 600px;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  padding: 0.4rem;
+  font-size: 1rem;
+  font-family: inherit;
+  resize: vertical;
+}
+.copy-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 40px;
+  transform: translateX(-50%);
+  background: #222;
+  color: #fff;
+  padding: 0.7rem 1.5rem;
+  border-radius: 8px;
+  font-size: 1.1rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  z-index: 2000;
+  opacity: 0.95;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+.copy-header-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.98rem;
+  margin-left: 1rem;
+  color: #444;
+  font-weight: 500;
 }
 </style> 
