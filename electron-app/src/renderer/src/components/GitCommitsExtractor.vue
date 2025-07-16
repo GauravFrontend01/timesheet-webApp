@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 
 const since = ref('')
 const until = ref('')
@@ -15,6 +15,11 @@ const tableRows = ref<Array<{
 }>>([])
 const rawOutput = ref('')
 const excludeWeekends = ref(true)
+
+// AI summary state
+const aiSummaries = ref<Record<string, string>>({})
+const aiTableLoading = ref(false)
+const summaryMode = ref<'normal' | 'ai'>('normal')
 
 // Settings state
 const showSettings = ref(false)
@@ -70,7 +75,6 @@ function setToday() {
   const dateStr = `${yyyy}-${mm}-${dd}`
   since.value = dateStr
   until.value = dateStr
-  console.log('Set Today:', { since: since.value, until: until.value })
   runExtraction()
 }
 
@@ -88,7 +92,6 @@ function setThisWeek() {
   const tmm = String(today.getMonth() + 1).padStart(2, '0')
   const tdd = String(today.getDate()).padStart(2, '0')
   until.value = `${tyyyy}-${tmm}-${tdd}`
-  console.log('Set This Week:', { since: since.value, until: until.value })
   runExtraction()
 }
 
@@ -99,7 +102,6 @@ function setThisMonth() {
   since.value = `${yyyy}-${mm}-01`
   const tdd = String(today.getDate()).padStart(2, '0')
   until.value = `${yyyy}-${mm}-${tdd}`
-  console.log('Set This Month:', { since: since.value, until: until.value })
   runExtraction()
 }
 
@@ -115,21 +117,13 @@ const runExtraction = async () => {
   tableRows.value = []
   rawOutput.value = ''
   loading.value = true
-  console.log('Running extraction with:', {
-    since: since.value,
-    until: until.value,
-    projects: settings.value.projects,
-    author: settings.value.author,
-    excludeWeekends: excludeWeekends.value
-  })
   try {
     const result = await (window.api as any).extractGitCommits(
       since.value,
       until.value,
-      [...settings.value.projects], // convert Proxy to plain array
+      [...settings.value.projects],
       settings.value.author
     )
-    console.log('extractGitCommits result:', result)
     let filteredRows = result.tableRows
     let filteredRaw = result.raw
     if (excludeWeekends.value) {
@@ -145,11 +139,10 @@ const runExtraction = async () => {
     }
     tableRows.value = filteredRows
     rawOutput.value = filteredRaw || ''
-    console.log('Filtered tableRows:', filteredRows)
-    console.log('Filtered rawOutput:', filteredRaw)
+    // Clear AI summaries for new extraction
+    aiSummaries.value = {}
   } catch (e: any) {
     error.value = e?.message || 'Failed to extract commits.'
-    console.log('Extraction error:', e)
   } finally {
     loading.value = false
   }
@@ -158,11 +151,57 @@ const runExtraction = async () => {
 const copyTable = () => {
   if (!tableRows.value.length) return
   const header = 'Date\tTask\tSummary\tHours\t\t'
-  const rows = tableRows.value.map(row =>
-    `${row.date}\t${row.task}\t${row.summary}\t${row.hours}\t${row.extra1}\t${row.extra2}`
-  )
+  const rows = tableRows.value.map(row => {
+    const summary = summaryMode.value === 'ai' && aiSummaries.value[row.date]
+      ? aiSummaries.value[row.date]
+      : row.summary
+    return `${row.date}\t${row.task}\t${summary}\t${row.hours}\t${row.extra1}\t${row.extra2}`
+  })
   const text = [header, ...rows].join('\n')
   navigator.clipboard.writeText(text)
+}
+
+const GEMINI_API_KEY = 'AIzaSyDk52Ylwt-9VhdPoyvKzzGdvswAU6lLwWc'
+async function fetchAISummariesForAll() {
+  aiTableLoading.value = true
+  try {
+    // Only summarize days that are missing
+    const missingRows = tableRows.value.filter(row => !aiSummaries.value[row.date])
+    if (!missingRows.length) {
+      aiTableLoading.value = false
+      return
+    }
+    const payload = missingRows.map(row => ({ date: row.date, summary: row.summary }))
+    console.log('Calling main process for AI summaries:', payload)
+    const result = await (window.api as any).fetchAISummaries(payload)
+    console.log('AI summaries result from main:', result)
+    for (const date in result) {
+      aiSummaries.value[date] = result[date]
+    }
+  } catch (e) {
+    console.log('AI summary IPC error:', e)
+    tableRows.value.forEach(row => {
+      if (!aiSummaries.value[row.date]) aiSummaries.value[row.date] = 'AI summary failed.'
+    })
+  } finally {
+    aiTableLoading.value = false
+  }
+}
+
+// Watch for summaryMode toggle to AI and fetch if needed
+watchSummaryMode()
+function watchSummaryMode() {
+  // Use a watcher-like effect
+  let lastMode = summaryMode.value
+  setInterval(() => {
+    if (summaryMode.value !== lastMode) {
+      lastMode = summaryMode.value
+      console.log('Summary mode switched to:', summaryMode.value)
+      if (summaryMode.value === 'ai' && tableRows.value.length) {
+        fetchAISummariesForAll()
+      }
+    }
+  }, 300)
 }
 </script>
 
@@ -194,23 +233,33 @@ const copyTable = () => {
       </label>
       <button @click="runExtraction" :disabled="loading || !since || !until">{{ loading ? 'Running...' : 'Run' }}</button>
     </div>
-    <div v-if="error" class="error">{{ error }}</div>
     <div class="split-panels">
       <div class="panel raw-panel">
         <h3>Git Log Output</h3>
         <pre class="raw-scrollable">{{ rawOutput }}</pre>
       </div>
       <div class="panel table-panel">
-        <h3>Excel Table</h3>
-        <button @click="copyTable" :disabled="!tableRows.length">Copy Table</button>
+        <div class="summary-toggle-row">
+          <span>Show:</span>
+          <label class="toggle-switch">
+            <input type="checkbox" v-model="summaryMode" true-value="ai" false-value="normal" />
+            <span class="slider"></span>
+            <span class="toggle-label-text">AI Summary</span>
+          </label>
+          <button @click="copyTable" :disabled="!tableRows.length">Copy Table</button>
+        </div>
         <div class="table-scrollable">
           <table v-if="tableRows.length">
             <thead>
               <tr>
                 <th>Date</th>
                 <th>Task</th>
-                <th>Summary</th>
+                <th>
+                  <span v-if="summaryMode === 'ai'" class="ai-label">AI Summary</span>
+                  <span v-else>Summary</span>
+                </th>
                 <th>Hours</th>
+                <th></th>
                 <th></th>
                 <th></th>
               </tr>
@@ -219,17 +268,25 @@ const copyTable = () => {
               <tr v-for="row in tableRows" :key="row.date + row.summary">
                 <td>{{ row.date }}</td>
                 <td>{{ row.task }}</td>
-                <td>{{ row.summary }}</td>
+                <td>
+                  <template v-if="summaryMode === 'ai'">
+                    <span v-if="aiTableLoading">Generating summaries...</span>
+                    <span v-else>{{ aiSummaries[row.date] || '' }}</span>
+                  </template>
+                  <template v-else>
+                    {{ row.summary }}
+                  </template>
+                </td>
                 <td>{{ row.hours }}</td>
                 <td>{{ row.extra1 }}</td>
                 <td>{{ row.extra2 }}</td>
+                <td></td>
               </tr>
             </tbody>
           </table>
         </div>
       </div>
     </div>
-
     <!-- Settings Modal -->
     <div v-if="showSettings" class="modal-overlay">
       <div class="modal">
@@ -345,10 +402,57 @@ const copyTable = () => {
   overflow: auto;
   margin-top: 0.5rem;
 }
-table {
-  width: 100%;
-  border-collapse: collapse;
-  color: #000;
+.summary-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 1.2rem;
+  margin-bottom: 0.5rem;
+}
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 48px;
+  height: 24px;
+  margin: 0 0.5rem;
+}
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #ccc;
+  border-radius: 24px;
+  transition: .4s;
+}
+.toggle-switch input:checked + .slider {
+  background-color: #7B61FF;
+}
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  border-radius: 50%;
+  transition: .4s;
+}
+.toggle-switch input:checked + .slider:before {
+  transform: translateX(24px);
+}
+.toggle-label-text {
+  margin-left: 0.7rem;
+  font-weight: 600;
+  color: #7B61FF;
+}
+.ai-label {
+  color: #7B61FF;
+  font-weight: 600;
 }
 th, td {
   border: 1px solid #ddd;

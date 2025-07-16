@@ -4,6 +4,9 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { execSync } from 'child_process'
 import * as path from 'path'
+import fetch from 'node-fetch'
+
+const GEMINI_API_KEY = 'AIzaSyDk52Ylwt-9VhdPoyvKzzGdvswAU6lLwWc'
 
 function createWindow(): void {
   // Create the browser window.
@@ -98,6 +101,40 @@ app.whenReady().then(() => {
     // Prepare raw output
     const raw = allCommits.map((c) => `${c.date} | [${c.project}] ${c.message}`).join('\n')
     return { raw, tableRows }
+  })
+
+  ipcMain.handle('fetch-ai-summaries', async (event, rows) => {
+    try {
+      if (!Array.isArray(rows) || !rows.length) return {}
+      const prompt =
+        `For each of the following days, summarize the work log in 1-2 sentences, focusing on what was accomplished. Return the summaries in the same order, separated by \n---\n.\n\n` +
+        rows.map((row) => `${row.date}: ${row.summary}`).join('\n')
+      const res = await fetch(
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' +
+          GEMINI_API_KEY,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }]
+          })
+        }
+      )
+      const data = await res.json()
+      let aiText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      const summaries = aiText.split(/\n---\n/).map((s) => s.trim())
+      const result = {}
+      rows.forEach((row, idx) => {
+        result[row.date] = summaries[idx] || 'No summary generated.'
+      })
+      return result
+    } catch (e) {
+      const result = {}
+      rows.forEach((row) => {
+        result[row.date] = 'AI summary failed.'
+      })
+      return result
+    }
   })
 
   createWindow()
